@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ETF 518880 本地版 (Pro)</title>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background-color: #f3f4f6; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+        .card { background: white; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); }
+        .input-group input { width: 100%; padding: 8px 12px; border: 1px solid #d1d5db; border-radius: 6px; margin-top: 4px; }
+        .btn { padding: 8px 16px; border-radius: 6px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+        .btn-green { background-color: #10b981; color: white; }
+        .btn-red { background-color: #ef4444; color: white; }
+        .status-dot { height: 10px; width: 10px; background-color: #bbb; border-radius: 50%; display: inline-block; margin-right: 5px; }
+        .status-ok { background-color: #10b981; }
+        .status-err { background-color: #ef4444; }
+        td { vertical-align: middle; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        function App() {
+            const [transactions, setTransactions] = useState([]);
+            const [currentPrice, setCurrentPrice] = useState('');
+            const [inputPrice, setInputPrice] = useState('');
+            const [inputQty, setInputQty] = useState('100'); 
+            const [saveStatus, setSaveStatus] = useState('loading');
+            
+            const [totalShares, setTotalShares] = useState(0);
+            const [dilutedCostPrice, setDilutedCostPrice] = useState(0);
+            const [totalNetInput, setTotalNetInput] = useState(0);
+
+            useEffect(() => {
+                fetch('/api/data')
+                    .then(res => res.json())
+                    .then(data => {
+                        if (data.transactions) setTransactions(data.transactions);
+                        if (data.currentPrice) setCurrentPrice(data.currentPrice);
+                        setSaveStatus('saved');
+                    })
+                    .catch(err => setSaveStatus('error'));
+            }, []);
+
+            const isFirstRun = useRef(true);
+            useEffect(() => {
+                calculatePortfolio();
+                if (isFirstRun.current) {
+                    isFirstRun.current = false;
+                    return;
+                }
+                setSaveStatus('loading');
+                const timer = setTimeout(() => {
+                    fetch('/api/save', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ transactions, currentPrice })
+                    })
+                    .then(res => res.ok ? setSaveStatus('saved') : setSaveStatus('error'))
+                    .catch(() => setSaveStatus('error'));
+                }, 800);
+                return () => clearTimeout(timer);
+            }, [transactions, currentPrice]);
+
+            const calculateFee = (price, qty) => price * qty * 0.0001;
+
+            const calculatePortfolio = () => {
+                let shares = 0;
+                let netInput = 0; 
+                transactions.forEach(tx => {
+                    const fee = calculateFee(tx.price, tx.qty);
+                    const amount = parseFloat(tx.price) * parseInt(tx.qty);
+                    if (tx.type === 'buy') {
+                        shares += parseInt(tx.qty);
+                        netInput += (amount + fee);
+                    } else if (tx.type === 'sell') {
+                        shares -= parseInt(tx.qty);
+                        netInput -= (amount - fee);
+                    }
+                });
+                shares = Math.max(0, shares);
+                if (shares === 0) netInput = 0; 
+                setTotalShares(shares);
+                setTotalNetInput(netInput);
+                setDilutedCostPrice(shares > 0 ? netInput / shares : 0);
+            };
+
+            const getTransactionsDetail = () => {
+                let shares = 0;
+                let netInput = 0;
+                return transactions.map(tx => {
+                    const fee = calculateFee(tx.price, tx.qty);
+                    const amount = parseFloat(tx.price) * parseInt(tx.qty);
+                    let singleBreakEven = tx.type === 'buy' ? tx.price * (1.0001 / 0.9999) : 0;
+
+                    if (tx.type === 'buy') {
+                        shares += parseInt(tx.qty);
+                        netInput += (amount + fee);
+                    } else if (tx.type === 'sell') {
+                        shares -= parseInt(tx.qty);
+                        netInput -= (amount - fee);
+                    }
+                    let curShares = Math.max(0, shares);
+                    const costAfter = curShares > 0 ? (curShares === 0 ? 0 : netInput / curShares) : 0;
+                    return { ...tx, costAfter, singleBreakEven };
+                });
+            };
+
+            const handleTransaction = (type) => {
+                const qty = parseInt(inputQty);
+                if (!inputPrice || isNaN(qty)) return alert("请输入单价和数量");
+                if (qty % 100 !== 0 || qty <= 0) return alert("份数必须是100的整数倍！");
+
+                const newTx = {
+                    id: Date.now(),
+                    type: type,
+                    price: parseFloat(inputPrice),
+                    qty: qty,
+                    date: new Date().toLocaleString()
+                };
+                if (type === 'sell' && qty > totalShares) return alert("持仓不足！");
+                setTransactions([...transactions, newTx]);
+                setInputPrice('');
+                setInputQty('100');
+            };
+
+            const deleteTransaction = (id) => {
+                if(confirm('删除记录？')) setTransactions(transactions.filter(tx => tx.id !== id));
+            };
+
+            const breakEvenPrice = totalShares > 0 && totalNetInput > 0 ? totalNetInput / (totalShares * 0.9999) : 0;
+            const netPnL = (totalShares * (parseFloat(currentPrice) || 0) * 0.9999) - totalNetInput;
+            const transactionsList = getTransactionsDetail();
+
+            return (
+                <div className="max-w-5xl mx-auto p-4">
+                    <div className="flex justify-between items-center mb-6">
+                        <div className="flex items-center gap-3">
+                            <h1 className="text-2xl font-bold text-gray-800">📊 ETF 营收计算器 (Pro版)</h1>
+                            <div className="text-xs px-2 py-1 rounded bg-gray-200 flex items-center">
+                                <span className={`status-dot ${saveStatus === 'saved' ? 'status-ok' : 'status-err'}`}></span>
+                                {saveStatus === 'saved' ? '已同步' : '未连接'}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6 text-center">
+                        <div className="card p-4 border-l-4 border-blue-500">
+                            <div className="text-gray-500 text-xs">持仓份额</div>
+                            <div className="text-xl font-bold">{totalShares.toLocaleString()}</div>
+                        </div>
+                        <div className="card p-4 border-l-4 border-purple-500">
+                            <div className="text-gray-500 text-xs">摊薄成本</div>
+                            <div className="text-xl font-bold">{dilutedCostPrice.toFixed(4)}</div>
+                        </div>
+                        <div className="card p-4 border-l-4 border-yellow-500 bg-yellow-50">
+                            <div className="text-yellow-700 text-xs font-bold">保本卖出点</div>
+                            <div className="text-2xl font-extrabold text-yellow-600">{breakEvenPrice.toFixed(4)}</div>
+                        </div>
+                        <div className={`card p-4 border-l-4 ${netPnL >= 0 ? 'border-red-500 bg-red-50' : 'border-green-500 bg-green-50'}`}>
+                            <div className="text-gray-500 text-xs">估算盈亏</div>
+                            <div className={`text-xl font-bold ${netPnL >= 0 ? 'text-red-600' : 'text-green-600'}`}>
+                                {netPnL.toFixed(2)}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
+                        <div className="md:col-span-4 space-y-4">
+                            <div className="card p-5">
+                                <h3 className="font-bold mb-4">录入交易</h3>
+                                <div className="space-y-4">
+                                    <div className="input-group">
+                                        <label className="text-xs text-gray-400">单价</label>
+                                        <input type="number" value={inputPrice} onChange={e => setInputPrice(e.target.value)} placeholder="0.000" />
+                                    </div>
+                                    <div className="input-group">
+                                        <label className="text-xs text-gray-400">数量 (100倍数)</label>
+                                        <input type="number" step="100" value={inputQty} onChange={e => setInputQty(e.target.value)} />
+                                        <div className="flex justify-between mt-2 px-1">
+                                            <button onClick={() => setInputQty(Math.max(100, parseInt(inputQty||0)-100))} className="text-blue-500 text-xs hover:underline">[-100]</button>
+                                            <button onClick={() => setInputQty(parseInt(inputQty||0)+100)} className="text-blue-500 text-xs hover:underline">[+100]</button>
+                                        </div>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <button onClick={() => handleTransaction('buy')} className="btn btn-red">买入</button>
+                                        <button onClick={() => handleTransaction('sell')} className="btn btn-green">卖出</button>
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="card p-5 bg-blue-50">
+                                <h3 className="font-bold mb-2 text-blue-800 text-sm">实时行情</h3>
+                                <input type="number" className="w-full p-2 border border-blue-200 rounded text-center font-bold" value={currentPrice} onChange={e => setCurrentPrice(e.target.value)} />
+                            </div>
+                        </div>
+
+                        <div className="md:col-span-8 card p-5 overflow-hidden">
+                            <h3 className="font-bold mb-4">交易流水</h3>
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-xs text-left">
+                                    <thead className="bg-gray-50 text-gray-500">
+                                        <tr>
+                                            <th className="p-2">类型</th>
+                                            <th className="p-2">单价</th>
+                                            <th className="p-2">数量</th>
+                                            <th className="p-2 bg-yellow-100 text-yellow-700">单笔保本</th>
+                                            <th className="p-2 bg-blue-100 text-blue-700">变动后成本</th>
+                                            <th className="p-2">操作</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {transactionsList.slice().reverse().map(tx => (
+                                            <tr key={tx.id} className="border-b">
+                                                <td className="p-2"><span className={`font-bold ${tx.type==='buy'?'text-red-500':'text-green-500'}`}>{tx.type==='buy'?'买入':'卖出'}</span></td>
+                                                <td className="p-2">{tx.price.toFixed(3)}</td>
+                                                <td className="p-2">{tx.qty}</td>
+                                                <td className="p-2 bg-yellow-50 font-bold">{tx.type==='buy' ? tx.singleBreakEven.toFixed(4) : '-'}</td>
+                                                <td className="p-2 bg-blue-50 font-bold">{tx.costAfter.toFixed(4)}</td>
+                                                <td className="p-2"><button onClick={() => deleteTransaction(tx.id)} className="text-gray-400">×</button></td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+        ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    </script>
+</body>
+</html>
